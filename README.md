@@ -11,11 +11,6 @@ This is project is in very early stages, don't use it unless you want to experim
 - Supports HTTP/1.0 and HTTP/1.1
 - Supports chunked transfer encoding in both request/response bodies
 
-Missing features:
-- Query parameters
-- Form data
-- Cookies
-
 ## Example
 
 ```zig
