@@ -1,4 +1,5 @@
 - read README.md for overview of the project
+- use ./check.sh to run tests
 
 Extra notes:
 - use `zig env` to get the path to the Zig standard library, if you need to check something
