@@ -205,3 +205,49 @@ test "Status: format" {
     const result = try std.fmt.bufPrint(&buf, "{f}", .{Status.not_found});
     try std.testing.expectEqualStrings("NOT_FOUND", result);
 }
+
+const IgnoreCase = struct {
+    pub fn hash(self: @This(), s: []const u8) u64 {
+        _ = self;
+        var h = std.hash.Wyhash.init(0);
+
+        // Process in 48-byte chunks
+        var i: usize = 0;
+        const chunk_size = 48;
+        var lc: [chunk_size]u8 = undefined;
+        while (i + chunk_size <= s.len) : (i += chunk_size) {
+            inline for (0..chunk_size) |j| {
+                lc[j] = std.ascii.toLower(s[i + j]);
+            }
+            h.update(&lc);
+        }
+
+        // Process remaining bytes
+        const remaining = s.len - i;
+        if (remaining > 0) {
+            for (0..remaining) |j| {
+                lc[j] = std.ascii.toLower(s[i + j]);
+            }
+            h.update(lc[0..remaining]);
+        }
+
+        return h.final();
+    }
+    pub fn eql(self: @This(), a: []const u8, b: []const u8) bool {
+        _ = self;
+        return std.ascii.eqlIgnoreCase(a, b);
+    }
+};
+
+pub const Headers = std.HashMapUnmanaged([]const u8, []const u8, IgnoreCase, 80);
+
+test "Headers: put/get case insenstive" {
+    var headers: Headers = .{};
+    defer headers.deinit(std.testing.allocator);
+
+    try headers.put(std.testing.allocator, "FOO", "bar");
+
+    const val = headers.get("foo");
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("bar", val.?);
+}

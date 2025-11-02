@@ -2,6 +2,7 @@ const std = @import("std");
 const zio = @import("zio");
 
 const Router = @import("router.zig").Router;
+const RequestParser = @import("parser.zig").RequestParser;
 
 const log = std.log.scoped(.dust);
 
@@ -52,10 +53,14 @@ pub fn Server(comptime Ctx: type) type {
             // Mark connection as inactive
             defer _ = self.active_connections.fetchSub(1, .acq_rel);
 
-            // If we failed somewhere, try to shutdown the connection
-            errdefer stream.shutdown(rt, .both) catch |err| {
+            var needs_shutdown = true;
+            defer if (needs_shutdown) stream.shutdown(rt, .both) catch |err| {
                 log.warn("Failed to shutdown client connection: {}", .{err});
             };
+
+            var parser: RequestParser = undefined;
+            try parser.init(self.allocator);
+            defer parser.deinit();
 
             var read_buffer: [4096]u8 = undefined;
             var reader = stream.reader(rt, &read_buffer);
@@ -64,18 +69,42 @@ pub fn Server(comptime Ctx: type) type {
             var writer = stream.writer(rt, &write_buffer);
 
             while (true) {
-                // TODO actual HTTP parser
+                var parsed_len: usize = 0;
+                while (!parser.state.headers_complete) {
+                    const buffered = reader.interface.buffered();
+                    const unparsed = buffered[parsed_len..];
+                    if (unparsed.len > 0) {
+                        try parser.feed(unparsed);
+                        parsed_len += unparsed.len;
+                        continue;
+                    }
 
-                const line = reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
-                    error.EndOfStream => break,
-                    else => return err,
-                };
+                    reader.interface.fillMore() catch |err| switch (err) {
+                        error.EndOfStream => {
+                            needs_shutdown = false;
+                            if (parsed_len == 0) {
+                                return;
+                            } else {
+                                return error.IncompleteRequest;
+                            }
+                        },
+                        else => return err,
+                    };
+                }
 
-                std.log.info("Received: {s}", .{line});
+                std.log.info("Received: {f} {s}", .{ parser.state.method, parser.state.url });
                 try writer.interface.flush();
 
-                break;
+                if (!parser.shouldKeepAlive()) {
+                    break;
+                }
+
+                // TODO we need to make sure we drain previous request body
             }
         }
     };
+}
+
+test {
+    _ = RequestParser;
 }
