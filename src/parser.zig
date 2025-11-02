@@ -36,14 +36,12 @@ fn mapError(err: c.llhttp_errno_t) ParseError {
 }
 
 pub const RequestParser = struct {
-    allocator: std.mem.Allocator,
     settings: c.llhttp_settings_t,
     parser: c.llhttp_t,
+    request: *Request,
     state: State = .{},
 
     const State = struct {
-        request: Request = .{},
-
         has_method: bool = false,
         has_version: bool = false,
         has_url: bool = false,
@@ -57,11 +55,11 @@ pub const RequestParser = struct {
         message_complete: bool = false,
     };
 
-    pub fn init(self: *RequestParser, allocator: std.mem.Allocator) !void {
+    pub fn init(self: *RequestParser, request: *Request) !void {
         self.* = .{
             .parser = undefined,
             .settings = undefined,
-            .allocator = allocator,
+            .request = request,
         };
 
         self.settings = std.mem.zeroes(c.llhttp_settings_t);
@@ -80,11 +78,10 @@ pub const RequestParser = struct {
     }
 
     pub fn deinit(self: *RequestParser) void {
-        self.state.request.headers.deinit(self.allocator);
+        _ = self;
     }
 
     pub fn reset(self: *RequestParser) void {
-        self.state.request.headers.deinit(self.allocator);
         self.state = .{};
         c.llhttp_reset(&self.parser);
     }
@@ -139,22 +136,22 @@ pub const RequestParser = struct {
     fn onMethod(parser: ?*c.llhttp_t) callconv(.c) c_int {
         const self: *RequestParser = @fieldParentPtr("parser", parser.?);
         self.state.has_method = true;
-        self.state.request.method = @enumFromInt(c.llhttp_get_method(&self.parser));
+        self.request.method = @enumFromInt(c.llhttp_get_method(&self.parser));
         return 0;
     }
 
     fn onVersion(parser: ?*c.llhttp_t) callconv(.c) c_int {
         const self: *RequestParser = @fieldParentPtr("parser", parser.?);
         self.state.has_version = true;
-        self.state.request.version_major = c.llhttp_get_http_major(&self.parser);
-        self.state.request.version_minor = c.llhttp_get_http_minor(&self.parser);
+        self.request.version_major = c.llhttp_get_http_major(&self.parser);
+        self.request.version_minor = c.llhttp_get_http_minor(&self.parser);
         return 0;
     }
 
     // Callbacks - store slices directly without copying
     fn onUrl(parser: ?*c.llhttp_t, at: [*c]const u8, length: usize) callconv(.c) c_int {
         const self: *RequestParser = @fieldParentPtr("parser", parser.?);
-        appendSlice(&self.state.request.url, at, length);
+        appendSlice(&self.request.url, at, length);
         return 0;
     }
 
@@ -189,7 +186,7 @@ pub const RequestParser = struct {
         std.debug.assert(self.state.has_header_field);
         std.debug.assert(self.state.header_value.len > 0);
 
-        self.state.request.headers.put(self.allocator, self.state.header_field, self.state.header_value) catch return -1;
+        self.request.headers.put(self.request.arena, self.state.header_field, self.state.header_value) catch return -1;
 
         self.state.header_value = "";
         self.state.header_field = "";
@@ -212,8 +209,15 @@ pub const RequestParser = struct {
 };
 
 test "RequestParser: basic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var req: Request = .{
+        .arena = arena.allocator(),
+    };
+
     var parser: RequestParser = undefined;
-    try parser.init(std.testing.allocator);
+    try parser.init(&req);
     defer parser.deinit();
 
     const request = "GET /example HTTP/1.1\r\nHost: example.com\r\n\r\n";
@@ -225,19 +229,19 @@ test "RequestParser: basic" {
     try parser.finish();
 
     try std.testing.expectEqual(true, parser.state.has_method);
-    try std.testing.expectEqual(.get, parser.state.request.method);
+    try std.testing.expectEqual(.get, req.method);
 
     try std.testing.expectEqual(true, parser.state.has_version);
-    try std.testing.expectEqual(1, parser.state.request.version_major);
-    try std.testing.expectEqual(1, parser.state.request.version_minor);
+    try std.testing.expectEqual(1, req.version_major);
+    try std.testing.expectEqual(1, req.version_minor);
 
     try std.testing.expectEqual(true, parser.state.has_url);
-    try std.testing.expectEqualStrings("/example", parser.state.request.url);
+    try std.testing.expectEqualStrings("/example", req.url);
 
     try std.testing.expectEqual(true, parser.state.headers_complete);
     try std.testing.expectEqual(true, parser.state.message_complete);
 
-    const host_val = parser.state.request.headers.get("Host");
+    const host_val = req.headers.get("Host");
     try std.testing.expect(host_val != null);
     try std.testing.expectEqualStrings("example.com", host_val.?);
 }

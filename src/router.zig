@@ -84,9 +84,26 @@ pub fn Router(comptime Ctx: type) type {
             return url_iter.next() == null;
         }
 
-        pub fn findHandler(self: *const Self, req: *const Request) ?Handler {
+        pub fn findHandler(self: *const Self, req: *Request) !?Handler {
             for (self.routes.items) |route| {
                 if (route.method == req.method and matchPath(route.path, req.url)) {
+                    // Extract parameters using request arena
+                    var pattern_iter = std.mem.splitScalar(u8, route.path, '/');
+                    var url_iter = std.mem.splitScalar(u8, req.url, '/');
+
+                    while (pattern_iter.next()) |pattern_seg| {
+                        const url_seg = url_iter.next() orelse break;
+
+                        // Skip empty segments
+                        if (pattern_seg.len == 0) continue;
+
+                        // Extract parameter
+                        if (pattern_seg[0] == ':') {
+                            const param_name = pattern_seg[1..]; // Skip the ':'
+                            try req.params.put(req.arena, param_name, url_seg);
+                        }
+                    }
+
                     return route.handler;
                 }
             }
@@ -147,84 +164,107 @@ test "matchPath: trailing slashes" {
 }
 
 test "Router: register and find GET route" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var router = TestRouter.init(std.testing.allocator);
     defer router.deinit();
 
     router.get("/users", testHandler);
 
-    const req = Request{
+    var req = Request{
         .method = .get,
         .url = "/users",
+        .arena = arena.allocator(),
     };
 
-    const handler = router.findHandler(&req);
+    const handler = try router.findHandler(&req);
     try std.testing.expect(handler != null);
     try std.testing.expect(handler.? == testHandler);
 }
 
 test "Router: register and find POST route" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var router = TestRouter.init(std.testing.allocator);
     defer router.deinit();
 
     router.post("/posts", testHandler);
 
-    const req = Request{
+    var req = Request{
         .method = .post,
         .url = "/posts",
+        .arena = arena.allocator(),
     };
 
-    const handler = router.findHandler(&req);
+    const handler = try router.findHandler(&req);
     try std.testing.expect(handler != null);
     try std.testing.expect(handler.? == testHandler);
 }
 
 test "Router: method mismatch returns null" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var router = TestRouter.init(std.testing.allocator);
     defer router.deinit();
 
     router.get("/users", testHandler);
 
-    const req = Request{
+    var req = Request{
         .method = .post,
         .url = "/users",
+        .arena = arena.allocator(),
     };
 
-    const handler = router.findHandler(&req);
+    const handler = try router.findHandler(&req);
     try std.testing.expect(handler == null);
 }
 
 test "Router: path mismatch returns null" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var router = TestRouter.init(std.testing.allocator);
     defer router.deinit();
 
     router.get("/users", testHandler);
 
-    const req = Request{
+    var req = Request{
         .method = .get,
         .url = "/posts",
+        .arena = arena.allocator(),
     };
 
-    const handler = router.findHandler(&req);
+    const handler = try router.findHandler(&req);
     try std.testing.expect(handler == null);
 }
 
 test "Router: parameterized routes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var router = TestRouter.init(std.testing.allocator);
     defer router.deinit();
 
     router.get("/users/:id", testHandler);
 
-    const req = Request{
+    var req = Request{
         .method = .get,
         .url = "/users/123",
+        .arena = arena.allocator(),
     };
 
-    const handler = router.findHandler(&req);
+    const handler = try router.findHandler(&req);
     try std.testing.expect(handler != null);
     try std.testing.expect(handler.? == testHandler);
 }
 
 test "Router: multiple routes" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var router = TestRouter.init(std.testing.allocator);
     defer router.deinit();
 
@@ -233,34 +273,40 @@ test "Router: multiple routes" {
     router.get("/posts", testHandler2);
 
     // Find first route
-    const req1 = Request{
+    var req1 = Request{
         .method = .get,
         .url = "/users",
+        .arena = arena.allocator(),
     };
-    const handler1 = router.findHandler(&req1);
+    const handler1 = try router.findHandler(&req1);
     try std.testing.expect(handler1 != null);
     try std.testing.expect(handler1.? == testHandler);
 
     // Find second route
-    const req2 = Request{
+    var req2 = Request{
         .method = .post,
         .url = "/users",
+        .arena = arena.allocator(),
     };
-    const handler2 = router.findHandler(&req2);
+    const handler2 = try router.findHandler(&req2);
     try std.testing.expect(handler2 != null);
     try std.testing.expect(handler2.? == testHandler2);
 
     // Find third route
-    const req3 = Request{
+    var req3 = Request{
         .method = .get,
         .url = "/posts",
+        .arena = arena.allocator(),
     };
-    const handler3 = router.findHandler(&req3);
+    const handler3 = try router.findHandler(&req3);
     try std.testing.expect(handler3 != null);
     try std.testing.expect(handler3.? == testHandler2);
 }
 
 test "Router: all HTTP methods" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
     var router = TestRouter.init(std.testing.allocator);
     defer router.deinit();
 
@@ -272,11 +318,85 @@ test "Router: all HTTP methods" {
 
     const methods = [_]Method{ .get, .post, .put, .delete, .head };
     for (methods) |method| {
-        const req = Request{
+        var req = Request{
             .method = method,
             .url = "/resource",
+            .arena = arena.allocator(),
         };
-        const handler = router.findHandler(&req);
+        const handler = try router.findHandler(&req);
         try std.testing.expect(handler != null);
     }
+}
+
+test "Router: extract single parameter" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var router = TestRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    router.get("/users/:id", testHandler);
+
+    var req = Request{
+        .method = .get,
+        .url = "/users/123",
+        .arena = arena.allocator(),
+    };
+
+    const handler = try router.findHandler(&req);
+    try std.testing.expect(handler != null);
+
+    const id = req.params.get("id");
+    try std.testing.expect(id != null);
+    try std.testing.expectEqualStrings("123", id.?);
+}
+
+test "Router: extract multiple parameters" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var router = TestRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    router.get("/users/:userId/posts/:postId", testHandler);
+
+    var req = Request{
+        .method = .get,
+        .url = "/users/456/posts/789",
+        .arena = arena.allocator(),
+    };
+
+    const handler = try router.findHandler(&req);
+    try std.testing.expect(handler != null);
+
+    const userId = req.params.get("userId");
+    try std.testing.expect(userId != null);
+    try std.testing.expectEqualStrings("456", userId.?);
+
+    const postId = req.params.get("postId");
+    try std.testing.expect(postId != null);
+    try std.testing.expectEqualStrings("789", postId.?);
+}
+
+test "Router: mixed static and parameter segments" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var router = TestRouter.init(std.testing.allocator);
+    defer router.deinit();
+
+    router.get("/api/v1/users/:id/profile", testHandler);
+
+    var req = Request{
+        .method = .get,
+        .url = "/api/v1/users/abc123/profile",
+        .arena = arena.allocator(),
+    };
+
+    const handler = try router.findHandler(&req);
+    try std.testing.expect(handler != null);
+
+    const id = req.params.get("id");
+    try std.testing.expect(id != null);
+    try std.testing.expectEqualStrings("abc123", id.?);
 }

@@ -3,6 +3,7 @@ const zio = @import("zio");
 
 const Router = @import("router.zig").Router;
 const RequestParser = @import("parser.zig").RequestParser;
+const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 
 const log = std.log.scoped(.dust);
@@ -59,17 +60,29 @@ pub fn Server(comptime Ctx: type) type {
                 log.warn("Failed to shutdown client connection: {}", .{err});
             };
 
-            var parser: RequestParser = undefined;
-            try parser.init(self.allocator);
-            defer parser.deinit();
-
             var read_buffer: [4096]u8 = undefined;
             var reader = stream.reader(rt, &read_buffer);
 
             var write_buffer: [4096]u8 = undefined;
             var writer = stream.writer(rt, &write_buffer);
 
+            var arena = std.heap.ArenaAllocator.init(self.allocator);
+            defer arena.deinit();
+
+            var request: Request = .{
+                .arena = arena.allocator(),
+            };
+
+            var parser: RequestParser = undefined;
+            try parser.init(&request);
+            defer parser.deinit();
+
             while (true) {
+                defer {
+                    _ = arena.reset(.retain_capacity);
+                    request.reset();
+                }
+
                 var parsed_len: usize = 0;
                 while (!parser.state.headers_complete) {
                     const buffered = reader.interface.buffered();
@@ -93,15 +106,15 @@ pub fn Server(comptime Ctx: type) type {
                     };
                 }
 
-                std.log.info("Received: {f} {s}", .{ parser.state.request.method, parser.state.request.url });
+                std.log.info("Received: {f} {s}", .{ request.method, request.url });
                 try writer.interface.flush();
 
-                const handler = self.router.findHandler(&parser.state.request) orelse {
+                const handler = try self.router.findHandler(&request) orelse {
                     @panic("handle 404");
                 };
 
                 var response: Response = undefined;
-                handler(self.ctx, &parser.state.request, &response);
+                handler(self.ctx, &request, &response);
 
                 if (!parser.shouldKeepAlive() or true) {
                     break;

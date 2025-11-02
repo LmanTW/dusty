@@ -16,7 +16,8 @@ fn handleRoot(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response)
 fn handleUser(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) void {
     _ = ctx;
     _ = res;
-    std.log.info("Handling user request: {s}", .{req.url});
+    const id = req.params.get("id") orelse "unknown";
+    std.log.info("Handling user request: {s}, id={s}", .{ req.url, id });
 }
 
 fn handlePost(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) void {

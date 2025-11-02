@@ -8,4 +8,13 @@ pub const Request = struct {
     version_major: u8 = 0,
     version_minor: u8 = 0,
     headers: http.Headers = .{},
+    params: std.StringHashMapUnmanaged([]const u8) = .{},
+    arena: std.mem.Allocator = undefined,
+
+    pub fn reset(self: *Request) void {
+        const arena = self.arena;
+        self.* = .{
+            .arena = arena,
+        };
+    }
 };
