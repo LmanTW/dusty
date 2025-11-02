@@ -21,6 +21,19 @@ fn defaultNotFound(req: *Request, res: *Response) void {
     res.body = "404 Not Found\n";
 }
 
+pub const Config = struct {
+    timeout: Timeout = .{},
+
+    pub const Timeout = struct {
+        /// Maximum time (ms) to receive a complete request
+        request: ?u64 = null,
+        /// Maximum time (ms) to keep idle connections open
+        keepalive: ?u64 = null,
+        /// Maximum number of requests per keepalive connection
+        request_count: ?usize = null,
+    };
+};
+
 pub fn Server(comptime Ctx: type) type {
     return struct {
         const Self = @This();
@@ -36,15 +49,17 @@ pub fn Server(comptime Ctx: type) type {
         allocator: std.mem.Allocator,
         router: Router(Ctx),
         ctx: *Ctx,
+        config: Config,
         active_connections: std.atomic.Value(usize),
         address: zio.net.Address,
         ready: zio.ResetEvent,
 
-        pub fn init(allocator: std.mem.Allocator, ctx: *Ctx) Self {
+        pub fn init(allocator: std.mem.Allocator, config: Config, ctx: *Ctx) Self {
             return .{
                 .allocator = allocator,
                 .router = Router(Ctx).init(allocator),
                 .ctx = ctx,
+                .config = config,
                 .active_connections = std.atomic.Value(usize).init(0),
                 .address = undefined,
                 .ready = .init,
@@ -108,7 +123,20 @@ pub fn Server(comptime Ctx: type) type {
 
             request.parser = &parser;
 
+            var request_count: usize = 0;
+
+            var timeout = zio.Timeout.init;
+
             while (true) {
+                request_count += 1;
+
+                defer timeout.clear(rt);
+                if (self.config.timeout.request) |timeout_ms| {
+                    timeout.set(rt, timeout_ms * std.time.ns_per_ms);
+                }
+
+                // TODO: handle error.Canceled caused by timeout and return 504
+
                 var parsed_len: usize = 0;
                 while (!parser.state.headers_complete) {
                     const buffered = reader.interface.buffered();
@@ -160,8 +188,17 @@ pub fn Server(comptime Ctx: type) type {
                 std.log.info("Received: {f} {s}", .{ request.method, request.url });
 
                 var response = Response.init(arena.allocator(), &writer.interface);
+
+                // Check if the connection allows keepalive
                 if (!parser.shouldKeepAlive()) {
                     response.keepalive = false;
+                }
+
+                // Check if we've reached the request count limit
+                if (self.config.timeout.request_count) |max_count| {
+                    if (request_count >= max_count) {
+                        response.keepalive = false;
+                    }
                 }
 
                 if (try self.router.findHandler(&request)) |handler| {
@@ -179,6 +216,7 @@ pub fn Server(comptime Ctx: type) type {
                 }
 
                 if (!parser.isBodyComplete()) {
+                    // TODO maybe we should drain the body here?
                     response.keepalive = false;
                 }
 
@@ -191,6 +229,23 @@ pub fn Server(comptime Ctx: type) type {
                 parser.reset();
                 request.reset();
                 _ = arena.reset(.retain_capacity);
+
+                // Activate keepalive timeout
+                if (self.config.timeout.keepalive) |timeout_ms| {
+                    timeout.set(rt, timeout_ms * std.time.ns_per_ms);
+                }
+
+                // Fill some data here, while the the keepalive timeout is active
+                reader.interface.fillMore() catch |err| switch (err) {
+                    error.EndOfStream => {
+                        needs_shutdown = false;
+                        return;
+                    },
+                    else => {
+                        // TODO: handle error.Canceled caused by timeout and return cleanly
+                        return err;
+                    },
+                };
             }
         }
     };
