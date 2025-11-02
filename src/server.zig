@@ -33,9 +33,30 @@ fn writeResponse(writer: *std.Io.Writer, response: *Response) !void {
     try writer.flush();
 }
 
+fn defaultUncaughtError(req: *const Request, res: *Response, err: anyerror) void {
+    _ = req;
+    log.err("Handler failed: {}", .{err});
+    res.status = .internal_server_error;
+    res.body = "500 Internal Server Error\n";
+}
+
+fn defaultNotFound(req: *const Request, res: *Response) void {
+    log.info("No handler found for {s}", .{req.url});
+    res.status = .not_found;
+    res.body = "404 Not Found\n";
+}
+
 pub fn Server(comptime Ctx: type) type {
     return struct {
         const Self = @This();
+
+        fn handleError(self: *Self, req: *const Request, res: *Response, err: anyerror) void {
+            if (comptime std.meta.hasFn(Ctx, "uncaughtError")) {
+                self.ctx.uncaughtError(req, res, err);
+            } else {
+                defaultUncaughtError(req, res, err);
+            }
+        }
 
         allocator: std.mem.Allocator,
         router: Router(Ctx),
@@ -134,14 +155,16 @@ pub fn Server(comptime Ctx: type) type {
 
                 if (try self.router.findHandler(&request)) |handler| {
                     handler(self.ctx, &request, &response) catch |err| {
-                        log.err("Handler failed: {}", .{err});
-                        response.status = .internal_server_error;
-                        response.body = "500 Internal Server Error\n";
+                        self.handleError(&request, &response, err);
                     };
                 } else {
-                    log.info("No handler found for {s}", .{request.url});
-                    response.status = .not_found;
-                    response.body = "404 Not Found\n";
+                    if (comptime std.meta.hasFn(Ctx, "notFound")) {
+                        self.ctx.notFound(&request, &response) catch |err| {
+                            self.handleError(&request, &response, err);
+                        };
+                    } else {
+                        defaultNotFound(&request, &response);
+                    }
                 }
 
                 try writeResponse(&writer.interface, &response);

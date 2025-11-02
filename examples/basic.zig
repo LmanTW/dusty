@@ -4,6 +4,20 @@ const dusty = @import("dusty");
 
 const AppContext = struct {
     counter: usize = 0,
+
+    pub fn uncaughtError(self: *AppContext, req: *const dusty.Request, res: *dusty.Response, err: anyerror) void {
+        _ = self;
+        std.log.err("Uncaught error for {s}: {}", .{ req.url, err });
+        res.status = .internal_server_error;
+        res.body = std.fmt.allocPrint(res.arena, "Error: {s}\n", .{@errorName(err)}) catch "500 Internal Server Error\n";
+    }
+
+    pub fn notFound(self: *AppContext, req: *const dusty.Request, res: *dusty.Response) !void {
+        _ = self;
+        std.log.warn("Route not found: {s}", .{req.url});
+        res.status = .not_found;
+        res.body = try std.fmt.allocPrint(res.arena, "Oops! '{s}' was not found\n", .{req.url});
+    }
 };
 
 fn handleRoot(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) !void {
@@ -15,12 +29,19 @@ fn handleRoot(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response)
 fn handleUser(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) !void {
     _ = ctx;
     const id = req.params.get("id") orelse "unknown";
-    res.body = std.fmt.allocPrint(req.arena, "Hello User {s}\n", .{id}) catch unreachable;
+    res.body = try std.fmt.allocPrint(req.arena, "Hello User {s}\n", .{id});
 }
 
 fn handlePost(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) !void {
     ctx.counter += 1;
-    res.body = std.fmt.allocPrint(req.arena, "Counter: {d}\n", .{ctx.counter}) catch unreachable;
+    res.body = try std.fmt.allocPrint(req.arena, "Counter: {d}\n", .{ctx.counter});
+}
+
+fn handleError(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) !void {
+    _ = ctx;
+    _ = req;
+    _ = res;
+    return error.TestError;
 }
 
 pub fn runServer(allocator: std.mem.Allocator, rt: *zio.Runtime) !void {
@@ -33,6 +54,7 @@ pub fn runServer(allocator: std.mem.Allocator, rt: *zio.Runtime) !void {
     server.router.get("/", handleRoot);
     server.router.get("/users/:id", handleUser);
     server.router.post("/posts", handlePost);
+    server.router.get("/error", handleError);
 
     const addr = try zio.net.IpAddress.parseIp("127.0.0.1", 8080);
     try server.listen(rt, addr);
