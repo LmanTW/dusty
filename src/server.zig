@@ -8,31 +8,6 @@ const Response = @import("response.zig").Response;
 
 const log = std.log.scoped(.dust);
 
-fn writeResponseHeader(writer: *std.Io.Writer, response: *Response) !void {
-    // TODO maybe support 1.0 responses?
-    try writer.print("HTTP/1.1 {d} {f}\r\n", .{ @intFromEnum(response.status), response.status });
-
-    var iter = response.headers.iterator();
-    while (iter.next()) |entry| {
-        try writer.print("{s}: {s}\r\n", .{ entry.key_ptr.*, entry.value_ptr.* });
-    }
-
-    const has_content_length = response.headers.get("Content-Length") != null;
-    if (!has_content_length) {
-        try writer.print("Content-Length: {d}\r\n", .{response.body.len});
-    }
-
-    // TODO add Connection header
-
-    try writer.writeAll("\r\n");
-}
-
-fn writeResponse(writer: *std.Io.Writer, response: *Response) !void {
-    try writeResponseHeader(writer, response);
-    try writer.writeAll(response.body);
-    try writer.flush();
-}
-
 fn defaultUncaughtError(req: *const Request, res: *Response, err: anyerror) void {
     _ = req;
     log.err("Handler failed: {}", .{err});
@@ -149,9 +124,7 @@ pub fn Server(comptime Ctx: type) type {
 
                 std.log.info("Received: {f} {s}", .{ request.method, request.url });
 
-                var response: Response = .{
-                    .arena = arena.allocator(),
-                };
+                var response = Response.init(arena.allocator(), &writer.interface);
 
                 if (try self.router.findHandler(&request)) |handler| {
                     handler(self.ctx, &request, &response) catch |err| {
@@ -167,7 +140,7 @@ pub fn Server(comptime Ctx: type) type {
                     }
                 }
 
-                try writeResponse(&writer.interface, &response);
+                try response.write();
 
                 if (!parser.shouldKeepAlive() or true) {
                     break;
