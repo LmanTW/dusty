@@ -19,7 +19,9 @@ const std = @import("std");
 const zio = @import("zio");
 const http = @import("dusty");
 
-const AppContext = struct {};
+const AppContext = struct {
+    rt: *zio.Runtime,
+};
 
 fn handleIndex(ctx: *AppContext, req: *const http.Request, res: *http.Response) !void {
     _ = ctx;
@@ -30,14 +32,14 @@ fn handleIndex(ctx: *AppContext, req: *const http.Request, res: *http.Response) 
 // ...
 
 fn runServer(allocator: std.mem.Allocator, rt: *zio.Runtime) !void {
-    var ctx: AppContext = .{};
+    var ctx: AppContext = .{ .rt = rt };
 
-    var server = http.Server(AppContext).init(allocator, &ctx);
+    var server = http.Server(AppContext).init(allocator, .{}, &ctx);
     defer server.deinit();
 
     server.router.get("/", handleIndex);
     server.router.get("/file/:id", handleFile);
-    server.router.post("/download/*path", handleDownload);
+    server.router.put("/upload/*path", handleUpload);
 
     const addr = try zio.net.IpAddress.parseIp("127.0.0.1", 8080);
     try server.listen(rt, addr);
