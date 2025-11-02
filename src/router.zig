@@ -7,12 +7,12 @@ pub fn Router(comptime Ctx: type) type {
     return struct {
         const Self = @This();
 
-        pub const Handler = *const fn (*Ctx, *const Request, *Response) void;
+        pub const Handler = fn (*Ctx, *const Request, *Response) anyerror!void;
 
         const Route = struct {
             method: Method,
             path: []const u8,
-            handler: Handler,
+            handler: *const Handler,
         };
 
         allocator: std.mem.Allocator,
@@ -32,7 +32,7 @@ pub fn Router(comptime Ctx: type) type {
             self.routes.deinit(self.allocator);
         }
 
-        fn addRoute(self: *Self, method: Method, path: []const u8, handler: anytype) void {
+        fn addRoute(self: *Self, method: Method, path: []const u8, handler: Handler) void {
             const owned_path = self.allocator.dupe(u8, path) catch @panic("OOM");
             self.routes.append(self.allocator, .{
                 .method = method,
@@ -41,23 +41,23 @@ pub fn Router(comptime Ctx: type) type {
             }) catch @panic("OOM");
         }
 
-        pub fn get(self: *Self, path: []const u8, handler: anytype) void {
+        pub fn get(self: *Self, path: []const u8, handler: Handler) void {
             self.addRoute(.get, path, handler);
         }
 
-        pub fn head(self: *Self, path: []const u8, handler: anytype) void {
+        pub fn head(self: *Self, path: []const u8, handler: Handler) void {
             self.addRoute(.head, path, handler);
         }
 
-        pub fn post(self: *Self, path: []const u8, handler: anytype) void {
+        pub fn post(self: *Self, path: []const u8, handler: Handler) void {
             self.addRoute(.post, path, handler);
         }
 
-        pub fn put(self: *Self, path: []const u8, handler: anytype) void {
+        pub fn put(self: *Self, path: []const u8, handler: Handler) void {
             self.addRoute(.put, path, handler);
         }
 
-        pub fn delete(self: *Self, path: []const u8, handler: anytype) void {
+        pub fn delete(self: *Self, path: []const u8, handler: Handler) void {
             self.addRoute(.delete, path, handler);
         }
 
@@ -84,7 +84,7 @@ pub fn Router(comptime Ctx: type) type {
             return url_iter.next() == null;
         }
 
-        pub fn findHandler(self: *const Self, req: *Request) !?Handler {
+        pub fn findHandler(self: *const Self, req: *Request) !?*const Handler {
             for (self.routes.items) |route| {
                 if (route.method == req.method and matchPath(route.path, req.url)) {
                     // Extract parameters using request arena
@@ -119,13 +119,13 @@ const TestContext = struct {
     called: bool = false,
 };
 
-fn testHandler(ctx: *TestContext, req: *const Request, res: *Response) void {
+fn testHandler(ctx: *TestContext, req: *const Request, res: *Response) !void {
     _ = req;
     _ = res;
     ctx.called = true;
 }
 
-fn testHandler2(ctx: *TestContext, req: *const Request, res: *Response) void {
+fn testHandler2(ctx: *TestContext, req: *const Request, res: *Response) !void {
     _ = req;
     _ = res;
     _ = ctx;

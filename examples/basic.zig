@@ -6,19 +6,19 @@ const AppContext = struct {
     counter: usize = 0,
 };
 
-fn handleRoot(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) void {
+fn handleRoot(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) !void {
     _ = ctx;
     _ = req;
     res.body = "Hello World!\n";
 }
 
-fn handleUser(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) void {
+fn handleUser(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) !void {
     _ = ctx;
     const id = req.params.get("id") orelse "unknown";
     res.body = std.fmt.allocPrint(req.arena, "Hello User {s}\n", .{id}) catch unreachable;
 }
 
-fn handlePost(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) void {
+fn handlePost(ctx: *AppContext, req: *const dusty.Request, res: *dusty.Response) !void {
     ctx.counter += 1;
     res.body = std.fmt.allocPrint(req.arena, "Counter: {d}\n", .{ctx.counter}) catch unreachable;
 }

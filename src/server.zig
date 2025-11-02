@@ -133,8 +133,13 @@ pub fn Server(comptime Ctx: type) type {
                 };
 
                 if (try self.router.findHandler(&request)) |handler| {
-                    handler(self.ctx, &request, &response);
+                    handler(self.ctx, &request, &response) catch |err| {
+                        log.err("Handler failed: {}", .{err});
+                        response.status = .internal_server_error;
+                        response.body = "500 Internal Server Error\n";
+                    };
                 } else {
+                    log.info("No handler found for {s}", .{request.url});
                     response.status = .not_found;
                     response.body = "404 Not Found\n";
                 }
