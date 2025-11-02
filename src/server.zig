@@ -3,6 +3,7 @@ const zio = @import("zio");
 
 const Router = @import("router.zig").Router;
 const RequestParser = @import("parser.zig").RequestParser;
+const Response = @import("response.zig").Response;
 
 const log = std.log.scoped(.dust);
 
@@ -18,7 +19,7 @@ pub fn Server(comptime Ctx: type) type {
         pub fn init(allocator: std.mem.Allocator, ctx: *Ctx) Self {
             return .{
                 .allocator = allocator,
-                .router = .{},
+                .router = Router(Ctx).init(allocator),
                 .ctx = ctx,
                 .active_connections = std.atomic.Value(usize).init(0),
             };
@@ -29,7 +30,7 @@ pub fn Server(comptime Ctx: type) type {
         }
 
         pub fn listen(self: *Self, rt: *zio.Runtime, addr: zio.net.IpAddress) !void {
-            const server = try addr.listen(rt, .{});
+            const server = try addr.listen(rt, .{ .reuse_address = true });
             defer server.close(rt);
 
             log.info("Listening on {f}", .{server.socket.address});
@@ -95,10 +96,18 @@ pub fn Server(comptime Ctx: type) type {
                 std.log.info("Received: {f} {s}", .{ parser.state.request.method, parser.state.request.url });
                 try writer.interface.flush();
 
-                if (!parser.shouldKeepAlive()) {
+                const handler = self.router.findHandler(&parser.state.request) orelse {
+                    @panic("handle 404");
+                };
+
+                var response: Response = undefined;
+                handler(self.ctx, &parser.state.request, &response);
+
+                if (!parser.shouldKeepAlive() or true) {
                     break;
                 }
 
+                parser.reset();
                 // TODO we need to make sure we drain previous request body
             }
         }
