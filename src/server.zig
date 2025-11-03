@@ -185,7 +185,7 @@ pub fn Server(comptime Ctx: type) type {
                     else => return err,
                 };
 
-                std.log.info("Received: {f} {s}", .{ request.method, request.url });
+                std.log.debug("Received: {f} {s}", .{ request.method, request.url });
 
                 var response = Response.init(arena.allocator(), &writer.interface);
 
