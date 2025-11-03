@@ -6,7 +6,7 @@ const RequestParser = @import("parser.zig").RequestParser;
 const Request = @import("request.zig").Request;
 const Response = @import("response.zig").Response;
 
-const log = std.log.scoped(.dust);
+const log = std.log.scoped(.dusty);
 
 fn defaultUncaughtError(req: *Request, res: *Response, err: anyerror) void {
     _ = req;
@@ -54,6 +54,7 @@ pub fn Server(comptime Ctx: type) type {
         address: zio.net.Address,
         ready: zio.ResetEvent,
         shutdown: zio.ResetEvent,
+        last_connection_closed: zio.Notify,
 
         pub fn init(allocator: std.mem.Allocator, config: ServerConfig, ctx: if (Ctx == void) void else *Ctx) Self {
             return .{
@@ -65,6 +66,7 @@ pub fn Server(comptime Ctx: type) type {
                 .address = undefined,
                 .ready = .init,
                 .shutdown = .init,
+                .last_connection_closed = .init,
             };
         }
 
@@ -98,6 +100,19 @@ pub fn Server(comptime Ctx: type) type {
                 },
                 .shutdown => {},
             }
+
+            var active_connections = self.active_connections.load(.acquire);
+            if (active_connections > 0) {
+                while (true) {
+                    log.info("Waiting for {} remaining connections to close", .{active_connections});
+                    try self.last_connection_closed.timedWait(rt, 100 * std.time.ns_per_ms);
+                    active_connections = self.active_connections.load(.acquire);
+                    if (active_connections == 0) {
+                        log.info("All connections closed", .{});
+                        break;
+                    }
+                }
+            }
         }
 
         pub fn acceptLoop(self: *Self, rt: *zio.Runtime, server: zio.net.Server) !void {
@@ -118,7 +133,12 @@ pub fn Server(comptime Ctx: type) type {
             defer stream.close(rt);
 
             // Mark connection as inactive
-            defer _ = self.active_connections.fetchSub(1, .acq_rel);
+            defer {
+                const v = self.active_connections.fetchSub(1, .acq_rel);
+                if (v == 1) {
+                    self.last_connection_closed.broadcast();
+                }
+            }
 
             var needs_shutdown = true;
             defer if (needs_shutdown) stream.shutdown(rt, .both) catch |err| {
