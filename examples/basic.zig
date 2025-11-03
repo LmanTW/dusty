@@ -137,27 +137,25 @@ pub fn runServer(allocator: std.mem.Allocator, rt: *zio.Runtime) !void {
     server.router.get("/json", handleJson);
     server.router.get("/api/users/:id", handleApiUser);
 
-    // Prepare signal handler
     var signal = try zio.Signal.init(.interrupt);
     defer signal.deinit();
 
     const addr = try zio.net.IpAddress.parseIp("127.0.0.1", 8080);
 
-    // Spawn the server in a separate coroutine
     var task = try rt.spawn(AppServer.listen, .{ &server, rt, addr }, .{});
     defer task.cancel(rt);
 
-    // Wait for server to become ready
-    try server.ready.wait(rt);
-    std.log.info("Listening on {f}", .{server.address});
-    std.log.info("Press Ctrl+C to stop", .{});
-
-    // Wait for SIGINT
-    try signal.wait(rt);
-
-    // Request graceful shutdown
-    std.log.info("Shutting down...", .{});
-    server.stop();
+    while (true) {
+        const result = try zio.select(rt, .{ .task = &task, .signal = &signal });
+        switch (result) {
+            .task => |r| {
+                return r;
+            },
+            .signal => {
+                server.stop();
+            },
+        }
+    }
 }
 
 pub fn main() !void {

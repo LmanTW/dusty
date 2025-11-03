@@ -73,6 +73,7 @@ pub fn Server(comptime Ctx: type) type {
         }
 
         pub fn stop(self: *Self) void {
+            log.info("Shutting down", .{});
             self.shutdown.set();
         }
 
@@ -82,6 +83,8 @@ pub fn Server(comptime Ctx: type) type {
 
             self.address = server.socket.address;
             self.ready.set();
+
+            log.info("Listening on {f}", .{self.address});
 
             var listener = try rt.spawn(acceptLoop, .{ self, rt, server }, .{});
             defer listener.cancel(rt);
