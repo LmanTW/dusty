@@ -187,7 +187,11 @@ def main() -> int:
 
         # Test graceful shutdown
         print("\nSending SIGINT for graceful shutdown...")
-        server_process.send_signal(signal.SIGINT)
+        if platform.system() == "Windows":
+            # On Windows, use CTRL_C_EVENT or terminate
+            server_process.terminate()
+        else:
+            server_process.send_signal(signal.SIGINT)
 
         # Wait for process to exit
         try:
