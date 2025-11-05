@@ -29,3 +29,7 @@ jobs:
     - name: Run tests
       run: zig build test --summary all
       timeout-minutes: 5
+
+    - name: Test demo server
+      run: python3 test_demo_server.py
+      timeout-minutes: 5
