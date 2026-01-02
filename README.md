@@ -1,4 +1,4 @@
-Dusty is a simple HTTP server built on top of [zio](https://github.com/lalinsky/zio) and [llhttp](https://github.com/nodejs/llhttp).
+Dusty is a simple HTTP server built on top of [zio](https://github.com/lalinsky/zio) (coroutine/async engine) and [llhttp](https://github.com/nodejs/llhttp) (HTTP parser from NodeJS).
 The API is very much inspired by Karl Seguin's [http.zig](https://github.com/karlseguin/http.zig), which is a great project and
 I would be happy using that, if I didn't need to run multiple network services inside the same application. 
 
