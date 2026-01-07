@@ -2,6 +2,8 @@ const std = @import("std");
 const http = @import("http.zig");
 const Request = @import("request.zig").Request;
 pub const WebSocket = @import("websocket.zig").WebSocket;
+pub const CookieOpts = @import("cookie.zig").CookieOpts;
+const serializeCookie = @import("cookie.zig").serializeCookie;
 
 pub const EventStream = struct {
     conn: *std.Io.Writer,
@@ -62,6 +64,11 @@ pub const Response = struct {
         const json_formatter = std.json.fmt(value, options);
         try json_formatter.format(&self.buffer.writer);
         try self.header("Content-Type", "application/json; charset=UTF-8");
+    }
+
+    pub fn setCookie(self: *Response, name: []const u8, value: []const u8, opts: CookieOpts) !void {
+        const serialized = try serializeCookie(self.arena, name, value, opts);
+        try self.header("Set-Cookie", serialized);
     }
 
     pub fn chunk(self: *Response, data: []const u8) !void {
@@ -709,4 +716,43 @@ test "Response: startEventStream" {
     try std.testing.expect(std.mem.indexOf(u8, written, "Cache-Control: no-cache") != null);
     try std.testing.expect(std.mem.indexOf(u8, written, "data: connected\n\n") != null);
     try std.testing.expectEqual(false, response.keepalive);
+}
+
+test "Response: setCookie basic" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var buf: [1024]u8 = undefined;
+    var conn_writer: std.Io.Writer = .fixed(&buf);
+
+    var response = Response.init(arena.allocator(), &conn_writer);
+    try response.setCookie("session", "abc123", .{});
+    response.body = "OK";
+
+    try response.write();
+
+    const written = conn_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, written, "Set-Cookie: session=abc123\r\n") != null);
+}
+
+test "Response: setCookie with options" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var buf: [1024]u8 = undefined;
+    var conn_writer: std.Io.Writer = .fixed(&buf);
+
+    var response = Response.init(arena.allocator(), &conn_writer);
+    try response.setCookie("auth", "token123", .{
+        .path = "/",
+        .http_only = true,
+        .secure = true,
+        .same_site = .strict,
+    });
+    response.body = "OK";
+
+    try response.write();
+
+    const written = conn_writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, written, "Set-Cookie: auth=token123; Path=/; HttpOnly; Secure; SameSite=Strict\r\n") != null);
 }
