@@ -39,11 +39,11 @@ fn parseUrl(url: []const u8) !Uri {
 }
 
 /// Get port from URI, defaulting based on scheme.
-fn uriPort(uri: Uri) !u16 {
+fn uriPort(uri: Uri) error{UnsupportedScheme}!u16 {
     if (uri.port) |p| return p;
     if (std.mem.eql(u8, uri.scheme, "http")) return 80;
-    if (std.mem.eql(u8, uri.scheme, "https")) return error.TlsNotSupported;
-    return 80;
+    if (std.mem.eql(u8, uri.scheme, "https")) return 443;
+    return error.UnsupportedScheme;
 }
 
 /// Get host string from URI.
@@ -537,9 +537,14 @@ test "parseUrl: URL without scheme is invalid" {
     try std.testing.expectError(error.InvalidUrl, parseUrl("example.com/path"));
 }
 
-test "parseUrl: HTTPS returns TlsNotSupported from uriPort" {
+test "parseUrl: HTTPS returns port 443" {
     const uri = try parseUrl("https://example.com/path");
-    try std.testing.expectError(error.TlsNotSupported, uriPort(uri));
+    try std.testing.expectEqual(443, try uriPort(uri));
+}
+
+test "parseUrl: unknown scheme returns UnsupportedScheme" {
+    const uri = try parseUrl("ftp://example.com/path");
+    try std.testing.expectError(error.UnsupportedScheme, uriPort(uri));
 }
 
 test "parseUrl: URL with query string" {
