@@ -381,10 +381,7 @@ pub const BodyReader = struct {
 };
 
 const MultipartForm = struct {
-    const Entry = struct {
-        value: []const u8,
-        filename: ?[]const u8 = null
-    };
+    const Entry = struct { value: []const u8, filename: ?[]const u8 = null };
 
     // The following chunk of code is from https://github.com/karlseguin/http.zig, see LICENSE for more details.
 
