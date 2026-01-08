@@ -155,7 +155,7 @@ pub const Connection = struct {
 
     // Connection pool metadata
     pool_node: std.DoublyLinkedList.Node = .{},
-    host_buffer: [256]u8 = undefined,
+    host_buffer: [Uri.host_name_max]u8 = undefined,
     host_len: u8 = 0,
     port: u16 = 0,
     closing: bool = false,
