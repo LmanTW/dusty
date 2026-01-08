@@ -1,5 +1,6 @@
 const std = @import("std");
 const zio = @import("zio");
+const Uri = std.Uri;
 
 const http = @import("http.zig");
 const Method = http.Method;
@@ -30,46 +31,30 @@ pub const FetchOptions = struct {
     max_redirects: ?u8 = null,
 };
 
-/// Parsed URL components.
-pub const ParsedUrl = struct {
-    host: []const u8,
-    port: u16,
-    path: []const u8,
+/// Parse a URL string into a std.Uri.
+fn parseUrl(url: []const u8) !Uri {
+    return Uri.parse(url) catch return error.InvalidUrl;
+}
 
-    pub fn parse(url: []const u8) !ParsedUrl {
-        var remaining = url;
+/// Get port from URI, defaulting based on scheme.
+fn uriPort(uri: Uri) !u16 {
+    if (uri.port) |p| return p;
+    if (std.mem.eql(u8, uri.scheme, "http")) return 80;
+    if (std.mem.eql(u8, uri.scheme, "https")) return error.TlsNotSupported;
+    return 80;
+}
 
-        // Strip "http://" prefix if present
-        if (std.mem.startsWith(u8, remaining, "http://")) {
-            remaining = remaining["http://".len..];
-        } else if (std.mem.startsWith(u8, remaining, "https://")) {
-            return error.TlsNotSupported;
-        }
+/// Get host string from URI.
+fn uriHost(uri: Uri, buffer: []u8) ![]const u8 {
+    return uri.getHost(buffer) catch return error.InvalidUrl;
+}
 
-        // Find path start
-        const path_start = std.mem.indexOfScalar(u8, remaining, '/') orelse remaining.len;
-        const host_port = remaining[0..path_start];
-        const path = if (path_start < remaining.len) remaining[path_start..] else "/";
-
-        // Validate host is not empty
-        if (host_port.len == 0) {
-            return error.InvalidUrl;
-        }
-
-        // Parse host:port
-        if (std.mem.indexOfScalar(u8, host_port, ':')) |colon| {
-            const host = host_port[0..colon];
-            const port_str = host_port[colon + 1 ..];
-            if (host.len == 0 or port_str.len == 0) {
-                return error.InvalidUrl;
-            }
-            const port = std.fmt.parseInt(u16, port_str, 10) catch return error.InvalidUrl;
-            return .{ .host = host, .port = port, .path = path };
-        } else {
-            return .{ .host = host_port, .port = 80, .path = path };
-        }
-    }
-};
+/// Get path with query string for HTTP request line.
+fn uriPathQuery(uri: Uri) []const u8 {
+    const path = uri.path.percent_encoded;
+    if (path.len == 0) return "/";
+    return path;
+}
 
 /// Pool of idle connections for reuse.
 pub const ConnectionPool = struct {
@@ -307,36 +292,39 @@ pub const Client = struct {
         url: []const u8,
         options: FetchOptions,
     ) !ClientResponse {
+        const uri = try parseUrl(url);
         const max_redirects = options.max_redirects orelse self.config.max_redirects;
-        return self.fetchInternal(rt, url, options, max_redirects);
+        return self.fetchInternal(rt, uri, options, max_redirects);
     }
 
     fn fetchInternal(
         self: *Client,
         rt: *zio.Runtime,
-        url: []const u8,
+        uri: Uri,
         options: FetchOptions,
         redirects_remaining: u8,
     ) !ClientResponse {
-        const parsed = try ParsedUrl.parse(url);
+        var host_buffer: [Uri.host_name_max]u8 = undefined;
+        const host = try uriHost(uri, &host_buffer);
+        const port = try uriPort(uri);
 
         // Try to get a connection from the pool
-        const conn = self.pool.acquire(parsed.host, parsed.port) orelse blk: {
+        const conn = self.pool.acquire(host, port) orelse blk: {
             // No pooled connection, create a new one
-            const addr = try zio.net.IpAddress.parseIp(parsed.host, parsed.port);
+            const addr = try zio.net.IpAddress.parseIp(host, port);
             const stream = try addr.connect(rt);
             errdefer stream.close(rt);
 
             const new_conn = try self.allocator.create(Connection);
             errdefer self.allocator.destroy(new_conn);
-            new_conn.init(self.allocator, rt, stream, parsed.host, parsed.port);
+            new_conn.init(self.allocator, rt, stream, host, port);
 
             break :blk new_conn;
         };
         errdefer self.pool.release(conn);
 
         // Send request
-        try writeRequest(&conn.writer.interface, options.method, parsed, options.headers, options.body);
+        try writeRequest(&conn.writer.interface, options.method, uri, host, port, options.headers, options.body);
 
         // Parse response headers
         try parseResponseHeaders(&conn.reader.interface, &conn.parser);
@@ -345,8 +333,11 @@ pub const Client = struct {
         const status_code = @intFromEnum(conn.parsed_response.status);
         if (status_code >= 300 and status_code < 400 and redirects_remaining > 0) {
             if (conn.parsed_response.headers.get("Location")) |location| {
-                // Resolve redirect URL
-                const redirect_url = try resolveRedirectUrl(url, location);
+                // Resolve redirect URL using RFC 3986
+                var resolve_buf: [2048]u8 = undefined;
+                @memcpy(resolve_buf[0..location.len], location);
+                var aux_buf: []u8 = resolve_buf[0..];
+                const redirect_uri = Uri.resolveInPlace(uri, location.len, &aux_buf) catch return error.InvalidUrl;
 
                 // Release current connection back to pool
                 conn.closing = !conn.parser.shouldKeepAlive();
@@ -359,7 +350,7 @@ pub const Client = struct {
                     redirect_options.body = null;
                 }
 
-                return self.fetchInternal(rt, redirect_url, redirect_options, redirects_remaining - 1);
+                return self.fetchInternal(rt, redirect_uri, redirect_options, redirects_remaining - 1);
             }
         }
 
@@ -375,18 +366,25 @@ pub const Client = struct {
 fn writeRequest(
     writer: *std.Io.Writer,
     method: Method,
-    parsed: ParsedUrl,
+    uri: Uri,
+    host: []const u8,
+    port: u16,
     headers_opt: ?*const Headers,
     body_content: ?[]const u8,
 ) !void {
-    // Request line
-    try writer.print("{s} {s} HTTP/1.1\r\n", .{ method.name(), parsed.path });
+    // Request line - path with query
+    const path = uriPathQuery(uri);
+    if (uri.query) |query| {
+        try writer.print("{s} {s}?{s} HTTP/1.1\r\n", .{ method.name(), path, query.percent_encoded });
+    } else {
+        try writer.print("{s} {s} HTTP/1.1\r\n", .{ method.name(), path });
+    }
 
     // Host header
-    if (parsed.port == 80) {
-        try writer.print("Host: {s}\r\n", .{parsed.host});
+    if (port == 80) {
+        try writer.print("Host: {s}\r\n", .{host});
     } else {
-        try writer.print("Host: {s}:{d}\r\n", .{ parsed.host, parsed.port });
+        try writer.print("Host: {s}:{d}\r\n", .{ host, port });
     }
 
     // Content-Length for body
@@ -415,19 +413,6 @@ fn writeRequest(
     }
 
     try writer.flush();
-}
-
-fn resolveRedirectUrl(base_url: []const u8, location: []const u8) ![]const u8 {
-    // If location is absolute, use it directly
-    if (std.mem.startsWith(u8, location, "http://") or std.mem.startsWith(u8, location, "https://")) {
-        return location;
-    }
-
-    // For relative URLs starting with /, construct absolute URL
-    // For now, just return location and hope it works
-    // TODO: Proper URL resolution
-    _ = base_url;
-    return location;
 }
 
 /// Parse HTTP response headers from a reader.
@@ -468,40 +453,87 @@ fn parseResponseHeaders(reader: *std.Io.Reader, parser: *ResponseParser) !void {
 
 // Tests
 
-test "ParsedUrl: basic URL" {
-    const url = try ParsedUrl.parse("http://example.com/path");
-    try std.testing.expectEqualStrings("example.com", url.host);
-    try std.testing.expectEqual(80, url.port);
-    try std.testing.expectEqualStrings("/path", url.path);
+test "parseUrl: basic URL" {
+    const uri = try parseUrl("http://example.com/path");
+    var host_buf: [Uri.host_name_max]u8 = undefined;
+    const host = try uriHost(uri, &host_buf);
+    try std.testing.expectEqualStrings("example.com", host);
+    try std.testing.expectEqual(80, try uriPort(uri));
+    try std.testing.expectEqualStrings("/path", uriPathQuery(uri));
 }
 
-test "ParsedUrl: URL with port" {
-    const url = try ParsedUrl.parse("http://example.com:8080/path");
-    try std.testing.expectEqualStrings("example.com", url.host);
-    try std.testing.expectEqual(8080, url.port);
-    try std.testing.expectEqualStrings("/path", url.path);
+test "parseUrl: URL with port" {
+    const uri = try parseUrl("http://example.com:8080/path");
+    var host_buf: [Uri.host_name_max]u8 = undefined;
+    const host = try uriHost(uri, &host_buf);
+    try std.testing.expectEqualStrings("example.com", host);
+    try std.testing.expectEqual(8080, try uriPort(uri));
+    try std.testing.expectEqualStrings("/path", uriPathQuery(uri));
 }
 
-test "ParsedUrl: URL without path" {
-    const url = try ParsedUrl.parse("http://example.com");
-    try std.testing.expectEqualStrings("example.com", url.host);
-    try std.testing.expectEqual(80, url.port);
-    try std.testing.expectEqualStrings("/", url.path);
+test "parseUrl: URL without path" {
+    const uri = try parseUrl("http://example.com");
+    var host_buf: [Uri.host_name_max]u8 = undefined;
+    const host = try uriHost(uri, &host_buf);
+    try std.testing.expectEqualStrings("example.com", host);
+    try std.testing.expectEqual(80, try uriPort(uri));
+    try std.testing.expectEqualStrings("/", uriPathQuery(uri));
 }
 
-test "ParsedUrl: URL without scheme" {
-    const url = try ParsedUrl.parse("example.com/path");
-    try std.testing.expectEqualStrings("example.com", url.host);
-    try std.testing.expectEqual(80, url.port);
-    try std.testing.expectEqualStrings("/path", url.path);
+test "parseUrl: URL without scheme is invalid" {
+    try std.testing.expectError(error.InvalidUrl, parseUrl("example.com/path"));
 }
 
-test "ParsedUrl: HTTPS not supported" {
-    const result = ParsedUrl.parse("https://example.com/path");
-    try std.testing.expectError(error.TlsNotSupported, result);
+test "parseUrl: HTTPS returns TlsNotSupported from uriPort" {
+    const uri = try parseUrl("https://example.com/path");
+    try std.testing.expectError(error.TlsNotSupported, uriPort(uri));
 }
 
-test "ParsedUrl: empty URL" {
-    const result = ParsedUrl.parse("");
-    try std.testing.expectError(error.InvalidUrl, result);
+test "parseUrl: URL with query string" {
+    const uri = try parseUrl("http://example.com/path?foo=bar&baz=qux");
+    var host_buf: [Uri.host_name_max]u8 = undefined;
+    const host = try uriHost(uri, &host_buf);
+    try std.testing.expectEqualStrings("example.com", host);
+    try std.testing.expectEqualStrings("/path", uriPathQuery(uri));
+    try std.testing.expectEqualStrings("foo=bar&baz=qux", uri.query.?.percent_encoded);
+}
+
+test "Uri.resolveInPlace: relative path" {
+    const base = try parseUrl("http://example.com/foo/bar");
+
+    // Test absolute path redirect
+    {
+        var buf: [256]u8 = undefined;
+        const location = "/new/path";
+        @memcpy(buf[0..location.len], location);
+        var aux: []u8 = buf[0..];
+        const resolved = try Uri.resolveInPlace(base, location.len, &aux);
+        try std.testing.expectEqualStrings("http", resolved.scheme);
+        try std.testing.expectEqualStrings("example.com", resolved.host.?.percent_encoded);
+        try std.testing.expectEqualStrings("/new/path", resolved.path.percent_encoded);
+    }
+
+    // Test relative path redirect
+    {
+        var buf: [256]u8 = undefined;
+        const location = "other";
+        @memcpy(buf[0..location.len], location);
+        var aux: []u8 = buf[0..];
+        const resolved = try Uri.resolveInPlace(base, location.len, &aux);
+        try std.testing.expectEqualStrings("http", resolved.scheme);
+        try std.testing.expectEqualStrings("example.com", resolved.host.?.percent_encoded);
+        try std.testing.expectEqualStrings("/foo/other", resolved.path.percent_encoded);
+    }
+
+    // Test absolute URL redirect
+    {
+        var buf: [256]u8 = undefined;
+        const location = "http://other.com/different";
+        @memcpy(buf[0..location.len], location);
+        var aux: []u8 = buf[0..];
+        const resolved = try Uri.resolveInPlace(base, location.len, &aux);
+        try std.testing.expectEqualStrings("http", resolved.scheme);
+        try std.testing.expectEqualStrings("other.com", resolved.host.?.percent_encoded);
+        try std.testing.expectEqualStrings("/different", resolved.path.percent_encoded);
+    }
 }
