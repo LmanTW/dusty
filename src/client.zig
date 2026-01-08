@@ -17,6 +17,8 @@ pub const ClientConfig = struct {
     max_redirects: u8 = 10,
     /// Maximum response body size in bytes.
     max_response_size: usize = 10_485_760, // 10MB
+    /// Maximum idle connections to keep in pool (0 = no pooling).
+    max_idle_connections: u8 = 8,
 };
 
 /// Options for a single fetch request.
@@ -69,6 +71,74 @@ pub const ParsedUrl = struct {
     }
 };
 
+/// Pool of idle connections for reuse.
+pub const ConnectionPool = struct {
+    allocator: std.mem.Allocator,
+    idle: std.DoublyLinkedList,
+    idle_len: usize,
+    max_idle: u8,
+
+    pub fn init(allocator: std.mem.Allocator, max_idle: u8) ConnectionPool {
+        return .{
+            .allocator = allocator,
+            .idle = .{},
+            .idle_len = 0,
+            .max_idle = max_idle,
+        };
+    }
+
+    pub fn deinit(self: *ConnectionPool) void {
+        // Close and free all idle connections
+        while (self.idle.popFirst()) |node| {
+            const conn: *Connection = @fieldParentPtr("pool_node", node);
+            conn.deinit();
+            self.allocator.destroy(conn);
+        }
+    }
+
+    /// Try to acquire an existing connection for the given host:port.
+    pub fn acquire(self: *ConnectionPool, remote_host: []const u8, remote_port: u16) ?*Connection {
+        // Search from end (most recently used)
+        var node = self.idle.last;
+        while (node) |n| {
+            const conn: *Connection = @fieldParentPtr("pool_node", n);
+            node = n.prev;
+
+            if (conn.matches(remote_host, remote_port)) {
+                self.idle.remove(n);
+                self.idle_len -= 1;
+                return conn;
+            }
+        }
+        return null;
+    }
+
+    /// Release a connection back to the pool, or close it if pool is full or connection is closing.
+    pub fn release(self: *ConnectionPool, conn: *Connection) void {
+        // Don't pool connections that are closing
+        if (conn.closing or self.max_idle == 0) {
+            conn.deinit();
+            self.allocator.destroy(conn);
+            return;
+        }
+
+        // If pool is full, close the oldest connection
+        if (self.idle_len >= self.max_idle) {
+            if (self.idle.popFirst()) |old_node| {
+                const old: *Connection = @fieldParentPtr("pool_node", old_node);
+                old.deinit();
+                self.allocator.destroy(old);
+                self.idle_len -= 1;
+            }
+        }
+
+        // Reset and add to pool
+        conn.reset();
+        self.idle.append(&conn.pool_node);
+        self.idle_len += 1;
+    }
+};
+
 /// A client connection that owns all resources for a request/response cycle.
 pub const Connection = struct {
     allocator: std.mem.Allocator,
@@ -82,12 +152,26 @@ pub const Connection = struct {
     writer: zio.net.Stream.Writer,
     rt: *zio.Runtime,
 
+    // Connection pool metadata
+    pool_node: std.DoublyLinkedList.Node = .{},
+    host_buffer: [256]u8 = undefined,
+    host_len: u8 = 0,
+    port: u16 = 0,
+    closing: bool = false,
+
     /// Initialize the connection in place (required because parser stores internal pointers).
-    pub fn init(self: *Connection, allocator: std.mem.Allocator, rt: *zio.Runtime, stream: zio.net.Stream) void {
+    pub fn init(self: *Connection, allocator: std.mem.Allocator, rt: *zio.Runtime, stream: zio.net.Stream, remote_host: []const u8, remote_port: u16) void {
         self.allocator = allocator;
         self.stream = stream;
         self.arena = std.heap.ArenaAllocator.init(allocator);
         self.rt = rt;
+        self.closing = false;
+
+        // Store host for connection pooling
+        const len: u8 = @intCast(@min(remote_host.len, self.host_buffer.len));
+        @memcpy(self.host_buffer[0..len], remote_host[0..len]);
+        self.host_len = len;
+        self.port = remote_port;
 
         self.parsed_response = .{ .arena = self.arena.allocator() };
         self.parser.init(&self.parsed_response);
@@ -106,6 +190,16 @@ pub const Connection = struct {
         self.parsed_response = .{ .arena = self.arena.allocator() };
         self.parser.reset();
         self.parser.init(&self.parsed_response);
+        self.closing = false;
+    }
+
+    pub fn host(self: *const Connection) []const u8 {
+        return self.host_buffer[0..self.host_len];
+    }
+
+    /// Check if this connection matches the given host and port.
+    pub fn matches(self: *const Connection, match_host: []const u8, match_port: u16) bool {
+        return self.port == match_port and std.ascii.eqlIgnoreCase(self.host(), match_host);
     }
 };
 
@@ -113,6 +207,7 @@ pub const Connection = struct {
 /// Call deinit() when done to release the connection.
 pub const ClientResponse = struct {
     conn: *Connection,
+    pool: *ConnectionPool,
     max_response_size: usize,
 
     // Cached body (read lazily)
@@ -120,11 +215,11 @@ pub const ClientResponse = struct {
     _body_read: bool = false,
     body_reader_buffer: [1024]u8 = undefined,
 
-    /// Release the connection (closes it for now, pooling later).
+    /// Release the connection back to the pool (or close if not reusable).
     pub fn deinit(self: *ClientResponse) void {
-        const allocator = self.conn.allocator;
-        self.conn.deinit();
-        allocator.destroy(self.conn);
+        // Set closing flag based on keep-alive
+        self.conn.closing = !self.conn.parser.shouldKeepAlive();
+        self.pool.release(self.conn);
     }
 
     /// Get response status.
@@ -191,18 +286,18 @@ pub const ClientResponse = struct {
 pub const Client = struct {
     allocator: std.mem.Allocator,
     config: ClientConfig,
+    pool: ConnectionPool,
 
     pub fn init(allocator: std.mem.Allocator, config: ClientConfig) Client {
         return .{
             .allocator = allocator,
             .config = config,
+            .pool = ConnectionPool.init(allocator, config.max_idle_connections),
         };
     }
 
-    pub fn deinit(self: *Client, rt: *zio.Runtime) void {
-        _ = self;
-        _ = rt;
-        // TODO: Close pooled connections when pooling is implemented
+    pub fn deinit(self: *Client) void {
+        self.pool.deinit();
     }
 
     /// Perform an HTTP request.
@@ -225,16 +320,20 @@ pub const Client = struct {
     ) !ClientResponse {
         const parsed = try ParsedUrl.parse(url);
 
-        // Connect to server
-        const addr = try zio.net.IpAddress.parseIp(parsed.host, parsed.port);
-        const stream = try addr.connect(rt);
-        errdefer stream.close(rt);
+        // Try to get a connection from the pool
+        const conn = self.pool.acquire(parsed.host, parsed.port) orelse blk: {
+            // No pooled connection, create a new one
+            const addr = try zio.net.IpAddress.parseIp(parsed.host, parsed.port);
+            const stream = try addr.connect(rt);
+            errdefer stream.close(rt);
 
-        // Create connection (owns all resources)
-        const conn = try self.allocator.create(Connection);
-        errdefer self.allocator.destroy(conn);
-        conn.init(self.allocator, rt, stream);
-        errdefer conn.deinit();
+            const new_conn = try self.allocator.create(Connection);
+            errdefer self.allocator.destroy(new_conn);
+            new_conn.init(self.allocator, rt, stream, parsed.host, parsed.port);
+
+            break :blk new_conn;
+        };
+        errdefer self.pool.release(conn);
 
         // Send request
         try writeRequest(&conn.writer.interface, options.method, parsed, options.headers, options.body);
@@ -249,9 +348,9 @@ pub const Client = struct {
                 // Resolve redirect URL
                 const redirect_url = try resolveRedirectUrl(url, location);
 
-                // Close current connection
-                conn.deinit();
-                self.allocator.destroy(conn);
+                // Release current connection back to pool
+                conn.closing = !conn.parser.shouldKeepAlive();
+                self.pool.release(conn);
 
                 // For 303, always use GET and clear body
                 var redirect_options = options;
@@ -264,9 +363,10 @@ pub const Client = struct {
             }
         }
 
-        // Build response (references connection)
+        // Build response (references connection and pool)
         return ClientResponse{
             .conn = conn,
+            .pool = &self.pool,
             .max_response_size = self.config.max_response_size,
         };
     }
