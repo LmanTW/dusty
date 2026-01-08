@@ -51,8 +51,8 @@ fn uriHost(uri: Uri, buffer: []u8) ![]const u8 {
     return uri.getHost(buffer) catch return error.InvalidUrl;
 }
 
-/// Get path with query string for HTTP request line.
-fn uriPathQuery(uri: Uri) []const u8 {
+/// Get path for HTTP request line.
+fn uriPath(uri: Uri) []const u8 {
     const path = uri.path.percent_encoded;
     if (path.len == 0) return "/";
     return path;
@@ -427,7 +427,7 @@ fn writeRequest(
     body_content: ?[]const u8,
 ) !void {
     // Request line - path with query
-    const path = uriPathQuery(uri);
+    const path = uriPath(uri);
     if (uri.query) |query| {
         try writer.print("{s} {s}?{s} HTTP/1.1\r\n", .{ method.name(), path, query.percent_encoded });
     } else {
@@ -513,7 +513,7 @@ test "parseUrl: basic URL" {
     const host = try uriHost(uri, &host_buf);
     try std.testing.expectEqualStrings("example.com", host);
     try std.testing.expectEqual(80, try uriPort(uri));
-    try std.testing.expectEqualStrings("/path", uriPathQuery(uri));
+    try std.testing.expectEqualStrings("/path", uriPath(uri));
 }
 
 test "parseUrl: URL with port" {
@@ -522,7 +522,7 @@ test "parseUrl: URL with port" {
     const host = try uriHost(uri, &host_buf);
     try std.testing.expectEqualStrings("example.com", host);
     try std.testing.expectEqual(8080, try uriPort(uri));
-    try std.testing.expectEqualStrings("/path", uriPathQuery(uri));
+    try std.testing.expectEqualStrings("/path", uriPath(uri));
 }
 
 test "parseUrl: URL without path" {
@@ -531,7 +531,7 @@ test "parseUrl: URL without path" {
     const host = try uriHost(uri, &host_buf);
     try std.testing.expectEqualStrings("example.com", host);
     try std.testing.expectEqual(80, try uriPort(uri));
-    try std.testing.expectEqualStrings("/", uriPathQuery(uri));
+    try std.testing.expectEqualStrings("/", uriPath(uri));
 }
 
 test "parseUrl: URL without scheme is invalid" {
@@ -553,7 +553,7 @@ test "parseUrl: URL with query string" {
     var host_buf: [Uri.host_name_max]u8 = undefined;
     const host = try uriHost(uri, &host_buf);
     try std.testing.expectEqualStrings("example.com", host);
-    try std.testing.expectEqualStrings("/path", uriPathQuery(uri));
+    try std.testing.expectEqualStrings("/path", uriPath(uri));
     try std.testing.expectEqualStrings("foo=bar&baz=qux", uri.query.?.percent_encoded);
 }
 
