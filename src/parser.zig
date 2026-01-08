@@ -220,7 +220,6 @@ pub const RequestParser = struct {
         const self: *RequestParser = @fieldParentPtr("parser", parser.?);
 
         std.debug.assert(self.state.has_header_field);
-        std.debug.assert(self.state.header_value.len > 0);
 
         self.request.headers.put(self.request.arena, self.state.header_field, self.state.header_value) catch return -1;
 
@@ -424,7 +423,6 @@ pub const ResponseParser = struct {
         const self: *ResponseParser = @fieldParentPtr("parser", parser.?);
 
         std.debug.assert(self.state.has_header_field);
-        std.debug.assert(self.state.header_value.len > 0);
 
         self.response.headers.put(self.response.arena, self.state.header_field, self.state.header_value) catch return -1;
 
