@@ -68,6 +68,7 @@ pub fn Server(comptime Ctx: type) type {
         router: Router(Ctx),
         ctx: if (Ctx == void) void else *Ctx,
         config: ServerConfig,
+        shutting_down: std.atomic.Value(bool),
         active_connections: std.atomic.Value(usize),
         address: zio.net.Address,
         ready: zio.ResetEvent,
@@ -79,6 +80,7 @@ pub fn Server(comptime Ctx: type) type {
                 .router = Router(Ctx).init(allocator),
                 .ctx = ctx,
                 .config = config,
+                .shutting_down = std.atomic.Value(bool).init(false),
                 .active_connections = std.atomic.Value(usize).init(0),
                 .address = undefined,
                 .ready = .init,
@@ -100,12 +102,16 @@ pub fn Server(comptime Ctx: type) type {
             log.info("Listening on {f}", .{self.address});
 
             var group: zio.Group = .init;
-            defer group.cancel(io);
+            defer {
+                self.shutting_down.store(true, .release);
+                group.cancel(io);
+            }
 
             while (true) {
                 const stream = server.accept(io) catch |err| {
                     if (err == error.Canceled) {
                         log.info("Graceful shutdown requested", .{});
+                        self.shutting_down.store(true, .release);
                         while (true) { // TODO: add graceful shutdown timeout
                             const remaining = self.active_connections.load(.acquire);
                             if (remaining == 0) break;
@@ -214,6 +220,10 @@ pub fn Server(comptime Ctx: type) type {
 
                 if (!parser.isBodyComplete()) {
                     // TODO maybe we should drain the body here?
+                    response.keepalive = false;
+                }
+
+                if (self.shutting_down.load(.acquire)) {
                     response.keepalive = false;
                 }
 
